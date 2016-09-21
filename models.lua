@@ -166,6 +166,49 @@ function make_decoder_attn(data, opt, simple)
    return nn.gModule(inputs, {context_output})   
 end
 
+function make_decoder_crf_attn(data, opt, simple)
+   -- 2D tensor target_t (batch_l x rnn_size) and
+   -- 3D tensor for context (batch_l x source_l x rnn_size)
+
+   local inputs = {}
+   table.insert(inputs, nn.Identity()())
+   table.insert(inputs, nn.Identity()())
+   local target_t = nn.LinearNoBias(opt.rnn_size, opt.rnn_size)(inputs[1])
+   local context = inputs[2]
+   simple = simple or 0
+   -- get attention
+
+   local attn = nn.MM()({context, nn.Replicate(1,3)(target_t)}) -- batch_l x source_l x 1
+   attn = nn.Sum(3)(attn)
+   local softmax_attn = nn.SoftMax()
+   softmax_attn.name = 'softmax_attn'
+   attn = softmax_attn(attn) 
+   attn = nn.Replicate(1,3)(attn) -- batch_l x source_l x 1
+   attn_complement = nn.MulConstant(-1)(attn) -- batch_l x source_l x 1
+   attn = nn.JoinTable(3)({attn, attn_complement}) -- batch_l x source_l x 2
+   crf = nn.CRF(2)
+   attn = crf(attn) -- batch_l x source_l + 1 x 2 x 2 
+   attn = nn.Exp()(attn)
+   attn = nn.Narrow(2, 1, -2)(attn) -- batch_l x source_l x 2 x 2
+   attn = nn.Sum(3)(attn) -- batch_l x source_l x 2
+   attn = nn.Select(3, 1)(attn) -- batch_l x source_l
+   attn = nn.Replicate(1, 2)(attn) -- batch_l x 1 x source_l 
+   
+   -- apply attention to context
+   local context_combined = nn.MM()({attn, context}) -- batch_l x 1 x rnn_size
+   context_combined = nn.Sum(2)(context_combined) -- batch_l x rnn_size
+   local context_output
+   if simple == 0 then
+      context_combined = nn.JoinTable(2)({context_combined, inputs[1]}) -- batch_l x rnn_size*2
+      context_output = nn.Tanh()(nn.LinearNoBias(opt.rnn_size*2,
+						 opt.rnn_size)(context_combined))
+   else
+      context_output = nn.CAddTable()({context_combined,inputs[1]})
+   end   
+   return nn.gModule(inputs, {context_output})   
+end
+
+
 function make_generator(data, opt)
    local model = nn.Sequential()
    model:add(nn.Linear(opt.rnn_size, data.target_size))
