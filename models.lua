@@ -1,3 +1,4 @@
+require 'CRF'
 
 function nn.Module:reuseMem()
    self.reuse = true
@@ -118,7 +119,12 @@ function make_lstm(data, opt, model, use_chars)
      local top_h = outputs[#outputs]
      local decoder_out
      if opt.attn == 1 then
-	local decoder_attn = make_decoder_attn(data, opt)
+        local decoder_attn
+        if opt.attn_type == 'vanilla' then
+	    decoder_attn = make_decoder_attn(data, opt)
+        elseif opt.attn_type == 'crf' then
+            decoder_attn = make_decoder_crf_attn(data, opt)
+        end
 	decoder_attn.name = 'decoder_attn'
 	decoder_out = decoder_attn({top_h, inputs[2]})
      else
@@ -180,18 +186,22 @@ function make_decoder_crf_attn(data, opt, simple)
 
    local attn = nn.MM()({context, nn.Replicate(1,3)(target_t)}) -- batch_l x source_l x 1
    attn = nn.Sum(3)(attn)
-   local softmax_attn = nn.SoftMax()
-   softmax_attn.name = 'softmax_attn'
-   attn = softmax_attn(attn) 
+   --local softmax_attn = nn.SoftMax()
+   --attn = softmax_attn(attn) 
    attn = nn.Replicate(1,3)(attn) -- batch_l x source_l x 1
    attn_complement = nn.MulConstant(-1)(attn) -- batch_l x source_l x 1
    attn = nn.JoinTable(3)({attn, attn_complement}) -- batch_l x source_l x 2
+   --attn = nn.Tanh()(attn)
+   --attn = nn.Dropout(.5)(attn)
    crf = nn.CRF(2)
+   --crf.weight:copy(torch.eye(2))
+   crf.name = 'softmax_attn'
    attn = crf(attn) -- batch_l x source_l + 1 x 2 x 2 
    attn = nn.Exp()(attn)
    attn = nn.Narrow(2, 1, -2)(attn) -- batch_l x source_l x 2 x 2
    attn = nn.Sum(3)(attn) -- batch_l x source_l x 2
    attn = nn.Select(3, 1)(attn) -- batch_l x source_l
+   --attn = nn.Normalize(2)(attn)
    attn = nn.Replicate(1, 2)(attn) -- batch_l x 1 x source_l 
    
    -- apply attention to context

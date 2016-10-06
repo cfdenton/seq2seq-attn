@@ -90,6 +90,7 @@ function Util.logadd(result, sign, tensor1, tensor2, tensor1Sign, tensor2Sign, m
       ge:add(-1):mul(-1)
       ge:cmul(tensor2Sign)
       sign:add(ge)
+      --result:apply(isnan) 
       Util.fixnan(result)
    end
 end
@@ -121,7 +122,7 @@ function Util.logsum(tensor, dim, tensorSign, dontchecknan)
    local sum = torch.add(max, sumExp:abs():log())
    if dontchecknan then
    else
-      sum:apply(isnan)
+      Util.fixnan(sum)
    end
    return sum, sign
 end

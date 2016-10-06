@@ -7,6 +7,8 @@ require 'models.lua'
 require 'data.lua'
 require 'util.lua'
 
+plpretty = require 'pl.pretty'
+
 stringx = require('pl.stringx')
 
 cmd = torch.CmdLine()
@@ -67,6 +69,7 @@ end
 
 function StateAll.advance(state, token)
    local new_state = copy(state)
+   --print(state)
    table.insert(new_state, token)
    return new_state
 end
@@ -124,13 +127,16 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
    scores:zero()
    local source_l = math.min(source:size(1), opt.max_sent_l)
    local attn_argmax = {}   -- store attn weights
+   local attention = {}
    attn_argmax[1] = {}
+   attention[1] = {}
 
    local states = {} -- store predicted word idx
    states[1] = {}
    for k = 1, 1 do
       table.insert(states[1], initial)
       table.insert(attn_argmax[1], initial)
+      table.insert(attention[1], {torch.zeros(source_l)})
       next_ys[1][k] = State.next(initial)
    end
 
@@ -212,6 +218,7 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
       i = i+1
       states[i] = {}
       attn_argmax[i] = {}
+      attention[i] = {}
       local decoder_input1
       if model_opt.use_chars_dec == 1 then
 	 decoder_input1 = word2charidx_targ:index(1, next_ys:narrow(1,i-1,1):squeeze())
@@ -271,6 +278,8 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
 		if model_opt.attn == 1 then
 		   max_attn, max_index = decoder_softmax.output[prev_k]:max(1)
 		   attn_argmax[i][k] = State.advance(attn_argmax[i-1][prev_k],max_index[1])         
+                   attention[i][k] = State.advance(attention[i-1][prev_k],
+                      decoder_softmax.output[prev_k])
 		end		
 	        prev_ks[i][k] = prev_k
                 next_ys[i][k] = y_i
@@ -288,6 +297,7 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
        end_score = scores[i][1]
        if model_opt.attn == 1 then
 	  end_attn_argmax = attn_argmax[i][1]
+          end_attention = attention[i][1]
        end       
        if end_hyp[#end_hyp] == END then
 	  done = true
@@ -302,6 +312,7 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
 		   max_score = scores[i][k]
 		   if model_opt.attn == 1 then
 		      max_attn_argmax = attn_argmax[i][k]
+                      max_attention = attention[i][k]
 		   end		   
 		end
 	     end	     
@@ -348,9 +359,10 @@ function generate_beam(model, initial, K, max_sent_l, source, gold)
       max_hyp = end_hyp
       max_score = end_score
       max_attn_argmax = end_attn_argmax
+      max_attention = end_attention
    end
 
-   return max_hyp, max_score, max_attn_argmax, gold_score, states[i], scores[i], attn_argmax[i]
+   return max_hyp, max_score, max_attn_argmax, gold_score, states[i], scores[i], attn_argmax[i], max_attention
 end
 
 function idx2key(file)   
@@ -643,13 +655,23 @@ function main()
 	 target, target_str = sent2wordidx(gold[sent_id], word2idx_targ, 1)
       end
       state = State.initial(START)
-      pred, pred_score, attn, gold_score, all_sents, all_scores, all_attn = generate_beam(model,
+      pred, pred_score, attn, gold_score, all_sents, all_scores, all_attn, attention = generate_beam(model,
   		state, opt.beam, MAX_SENT_L, source, target)
       pred_score_total = pred_score_total + pred_score
       pred_words_total = pred_words_total + #pred - 1
       pred_sent = wordidx2sent(pred, idx2word_targ, source_str, attn, true)
       out_file:write(pred_sent .. '\n')      
       print('PRED ' .. sent_id .. ': ' .. pred_sent)
+      io.write('Attn ' .. sent_id .. ': \n')
+      --print(attention)
+      for i, v in pairs(attention) do
+         io.write('   position ' .. i .. ': ')
+         for j = 1, attention[i]:size(1) do
+            io.write(math.floor(100*v[j] + .5)/100 .. ' ')
+         end
+         io.write('\n')
+      end
+      io.flush()
       if gold ~= nil then
 	 print('GOLD ' .. sent_id .. ': ' .. gold[sent_id])
 	 if opt.score_gold == 1 then
