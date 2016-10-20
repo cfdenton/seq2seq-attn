@@ -667,7 +667,8 @@ function main()
       for i, v in pairs(attention) do
          io.write('   position ' .. i .. ': ')
          for j = 1, attention[i]:size(1) do
-            io.write(math.floor(100*v[j] + .5)/100 .. ' ')
+            print(v[j])
+            --io.write(math.floor(100*v[j] + .5)/100 .. ' ')
          end
          io.write('\n')
       end

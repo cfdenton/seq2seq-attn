@@ -1,6 +1,7 @@
 require 'nn'
 require 'nngraph'
 require 'hdf5'
+require 'dpnn'
 
 require 'data.lua'
 require 'util.lua'
@@ -36,6 +37,10 @@ cmd:option('-word_vec_size', 500, [[Word embedding sizes]])
 cmd:option('-attn', 1, [[If = 1, use attention on the decoder side. If = 0, it uses the last
                        hidden state of the decoder as context at each time step.]])
 cmd:option('-attn_type', 'vanilla', [[Which type of attention to use]])
+cmd:option('-attn_tanh', false, [[ Tanh in attention]])
+cmd:option('-num_tags', 3, [[ Number of crf tags ]])
+cmd:option('-tag_emb', 25, [[ Tag embedding size ]])
+
 cmd:option('-brnn', 0, [[If = 1, use a bidirectional RNN. Hidden states of the fwd/bwd
                               RNNs are summed.]])
 cmd:option('-use_chars_enc', 0, [[If = 1, use character on the encoder 

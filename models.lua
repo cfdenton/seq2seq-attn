@@ -1,4 +1,7 @@
 require 'CRF'
+require 'MapTable.lua'
+--require 'Bottle.lua'
+
 
 function nn.Module:reuseMem()
    self.reuse = true
@@ -124,6 +127,12 @@ function make_lstm(data, opt, model, use_chars)
 	    decoder_attn = make_decoder_attn(data, opt)
         elseif opt.attn_type == 'crf' then
             decoder_attn = make_decoder_crf_attn(data, opt)
+        elseif opt.attn_type == 'vanilla2' then
+             decoder_attn = make_decoder_attn2(data, opt)
+        elseif opt.attn_type == 'crf2' then
+             decoder_attn = make_decoder_crf_attn2(data, opt)
+        elseif opt.attn_type == 'crf3' then
+             decoder_attn = make_decoder_crf_attn3(data, opt)
         end
 	decoder_attn.name = 'decoder_attn'
 	decoder_out = decoder_attn({top_h, inputs[2]})
@@ -193,14 +202,16 @@ function make_decoder_crf_attn(data, opt, simple)
    attn = nn.JoinTable(3)({attn, attn_complement}) -- batch_l x source_l x 2
    --attn = nn.Tanh()(attn)
    --attn = nn.Dropout(.5)(attn)
+   --attn = nn.Tanh()(attn)
    crf = nn.CRF(2)
-   --crf.weight:copy(torch.eye(2))
-   crf.name = 'softmax_attn'
+   crf.weight:copy(torch.Tensor({{1, 1}, {1, 0}}))
    attn = crf(attn) -- batch_l x source_l + 1 x 2 x 2 
    attn = nn.Exp()(attn)
    attn = nn.Narrow(2, 1, -2)(attn) -- batch_l x source_l x 2 x 2
    attn = nn.Sum(3)(attn) -- batch_l x source_l x 2
-   attn = nn.Select(3, 1)(attn) -- batch_l x source_l
+   out = nn.Select(3, 1)
+   out.name = 'softmax_attn'
+   attn = out(attn)
    --attn = nn.Normalize(2)(attn)
    attn = nn.Replicate(1, 2)(attn) -- batch_l x 1 x source_l 
    
@@ -218,6 +229,112 @@ function make_decoder_crf_attn(data, opt, simple)
    return nn.gModule(inputs, {context_output})   
 end
 
+function make_decoder_attn2(data, opt, simple)
+   local inputs = {}
+   table.insert(inputs, nn.Identity()())
+   table.insert(inputs, nn.Identity()())
+   local target_t = nn.Linear(opt.rnn_size, opt.rnn_size, false)(inputs[1]) -- batch_l x rnn_size
+   local context = inputs[2] -- batch_l x source_l x rnn_size
+   local attn = nn.MM()({context, nn.Replicate(1, 3)(target_t)}) -- batch_l x source_l x 1
+   attn = nn.Sum(3)(attn) -- batch_l x source_l
+
+   --optional
+   --[[
+   if opt.attn_tanh then
+      attn1 = nn.Tanh(attn1)
+      attn2 = nn.Tanh(attn2)
+   end
+   --]]
+
+   out = nn.Identity()
+   out.name = 'softmax_attn'
+   attn = out(attn)
+
+
+   attn = nn.Replicate(1, 2)(attn) -- batch_l x 1 x source_l
+   context_combined = nn.MM()({attn, context}) -- batch x 1 x rnn_size
+   context_combined = nn.Sum(2)(context_combined) -- batch_l x rnn_size
+   context_output = nn.CAddTable()({context_combined, inputs[1]})
+   return nn.gModule(inputs, {context_output})   
+end
+
+function make_decoder_crf_attn2(data, opt, simple)
+   local inputs = {}
+   table.insert(inputs, nn.Identity()())
+   table.insert(inputs, nn.Identity()())
+   local context = inputs[2] -- batch_l x source_l x rnn_size
+
+   local target_t = nn.Linear(opt.rnn_size, opt.rnn_size*2, false)(inputs[1]) -- batch_l x 2*rnn_size
+   local target_t1 = nn.Narrow(2, 1, opt.rnn_size)(target_t) -- batch_l x rnn_size
+   local target_t2 = nn.Narrow(2, opt.rnn_size+1, opt.rnn_size)(target_t) -- batch_l x rnn_size
+
+   local attn1 = nn.MM()({context, nn.Replicate(1, 3)(target_t1)})   
+   local attn2 = nn.MM()({context, nn.Replicate(1, 3)(target_t2)})
+
+   local attn = nn.JoinTable(3)({attn1, attn2})
+   attn = nn.MulConstant(.1)(attn)
+   --attn = nn.Tanh()(attn)
+   --attn = nn.Sigmoid()(attn)
+
+   crf = nn.CRF(2)
+   attn = crf(attn)
+   attn = nn.Exp()(attn)
+   attn = nn.Narrow(2, 1, -2)(attn)
+   attn = nn.Sum(4)(attn)
+   out = nn.Select(3, 1)
+   out.name = 'softmax_attn'
+   attn = out(attn)
+
+   attn = nn.Normalize(2)(attn)
+
+   attn = nn.Replicate(1, 2)(attn)
+   local context_combined = nn.MM()({attn, context})
+   context_combined = nn.Sum(2)(context_combined)
+   local context_output = nn.CAddTable()({context_combined, inputs[1]})
+
+   return nn.gModule(inputs, {context_output})
+end
+
+function make_decoder_crf_attn3(data, opt, simple)
+   local inputs = {}
+   table.insert(inputs, nn.Identity()())
+   table.insert(inputs, nn.Identity()())
+   local target = inputs[1] -- batch_l x rnn_size
+   local context = inputs[2] -- batch_l x source_l x rnn_size
+
+   local target_t = nn.Linear(opt.rnn_size, opt.rnn_size*opt.num_tags, false)(target) -- batch_l x opt.num_tags*rnn_size
+   target_t = nn.View(-1, opt.rnn_size, opt.num_tags)(target_t) -- batch_l x opt.rnn_size x opt.num_tags
+   -- batch_l x source_l x rnn_size
+   local tag_emb = nn.MM()({context, target_t}) -- batch_l x source_l x opt.num_tags 
+
+   tag_emb = nn.Tanh()(tag_emb)
+   --tag_emb = nn.MulConstant(.1)(tag_emb)
+   crf = nn.CRF(opt.num_tags)
+   tag_emb = crf(tag_emb) -- batch_l x source_l + 1 x opt.num_tags x opt.num_tags
+   tag_emb = nn.Exp()(tag_emb) -- batch_l x source_l x opt.num_tags x opt.num_tags
+   tag_emb = nn.Narrow(2, 1, -2)(tag_emb) -- batch_l x source_l x num_tags x num_tags
+   tag_emb = nn.Sum(4)(tag_emb) -- batch_l x source_l x num_tags
+   --tag_emb = nn.PrintSize('1')(tag_emb)
+   tag_emb = nn.Bottle(nn.Linear(opt.num_tags, opt.tag_emb, false))(tag_emb) -- batch_l x source_l x tag_emb
+
+   local context_tagged = nn.JoinTable(3)({context, tag_emb}) -- batch_l x source_l x rnn_size + tag_emb
+   context_tagged = nn.Bottle(nn.Linear(opt.rnn_size+opt.tag_emb, opt.rnn_size))(context_tagged) -- batch_l x source_l x rnn_size
+
+   local attn = nn.MM()({context_tagged, nn.Replicate(1, 3)(target)}) -- batch_l x source_l x 1 
+   attn = nn.Sum(3)(attn)
+
+   out = nn.Identity()
+   out.name = 'softmax_attn'
+   attn = out(attn)
+   
+   attn = nn.Replicate(1, 2)(attn) -- batch_l x 1 x source_l
+   context_combined = nn.MM()({attn, context}) -- batch x 1 x rnn_size
+   context_combined = nn.Sum(2)(context_combined) -- batch_l x rnn_size
+   local context_output = nn.CAddTable()({context_combined, inputs[1]})
+
+   return nn.gModule(inputs, {context_output})
+end
+
 
 function make_generator(data, opt)
    local model = nn.Sequential()
@@ -229,7 +346,6 @@ function make_generator(data, opt)
    criterion.sizeAverage = false
    return model, criterion
 end
-
 
 -- cnn Unit
 function make_cnn(input_size, kernel_width, num_kernels)
