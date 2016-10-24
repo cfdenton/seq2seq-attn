@@ -274,7 +274,7 @@ function make_decoder_crf_attn2(data, opt, simple)
    local attn = nn.JoinTable(3)({attn1, attn2})
    attn = nn.MulConstant(.1)(attn)
    --attn = nn.Tanh()(attn)
-   --attn = nn.Sigmoid()(attn)
+   attn = nn.Sigmoid()(attn)
 
    crf = nn.CRF(2)
    attn = crf(attn)
@@ -302,13 +302,17 @@ function make_decoder_crf_attn3(data, opt, simple)
    local target = inputs[1] -- batch_l x rnn_size
    local context = inputs[2] -- batch_l x source_l x rnn_size
 
+   --[[
+   local target_t = nn.Replicate(opt.num_tags, 3)(target) -- batch_l x rnn_size x num_tags
+   target_t = nn.Bottle(nn.Linear(opt.num_tags, 1)) -- batch_l x rnn_size x 1
+   target_t = nn.Sum(3)(target_t) -- batch_l x rnn_size
+   --]]
+
    local target_t = nn.Linear(opt.rnn_size, opt.rnn_size*opt.num_tags, false)(target) -- batch_l x opt.num_tags*rnn_size
    target_t = nn.View(-1, opt.rnn_size, opt.num_tags)(target_t) -- batch_l x opt.rnn_size x opt.num_tags
-   -- batch_l x source_l x rnn_size
    local tag_emb = nn.MM()({context, target_t}) -- batch_l x source_l x opt.num_tags 
 
    tag_emb = nn.Tanh()(tag_emb)
-   --tag_emb = nn.MulConstant(.1)(tag_emb)
    crf = nn.CRF(opt.num_tags)
    tag_emb = crf(tag_emb) -- batch_l x source_l + 1 x opt.num_tags x opt.num_tags
    tag_emb = nn.Exp()(tag_emb) -- batch_l x source_l x opt.num_tags x opt.num_tags
