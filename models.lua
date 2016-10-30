@@ -1,4 +1,6 @@
 require 'CRF'
+require 'CRF_static'
+require 'Print.lua'
 require 'MapTable.lua'
 --require 'Bottle.lua'
 
@@ -96,7 +98,9 @@ function make_lstm(data, opt, model, use_chars)
     end
     -- evaluate the input sums at once for efficiency
     local i2h = nn.Linear(input_size_L, 4 * rnn_size):reuseMem()(x)
+    i2h.data.module.name = 'i2h'
     local h2h = nn.LinearNoBias(rnn_size, 4 * rnn_size):reuseMem()(prev_h)
+    h2h.data.module.name = 'h2h'
     local all_input_sums = nn.CAddTable()({i2h, h2h})
 
     local reshaped = nn.Reshape(4, rnn_size)(all_input_sums)
@@ -133,12 +137,17 @@ function make_lstm(data, opt, model, use_chars)
              decoder_attn = make_decoder_crf_attn2(data, opt)
         elseif opt.attn_type == 'crf3' then
              decoder_attn = make_decoder_crf_attn3(data, opt)
+        elseif opt.attn_type == 'crf4' then
+             decoder_attn = make_decoder_crf_attn4(data, opt)
         end
 	decoder_attn.name = 'decoder_attn'
 	decoder_out = decoder_attn({top_h, inputs[2]})
      else
 	decoder_out = nn.JoinTable(2)({top_h, inputs[2]})
-	decoder_out = nn.Tanh()(nn.LinearNoBias(opt.rnn_size*2, opt.rnn_size)(decoder_out))
+        dec_linear = nn.Linear(opt.rnn_size*2, opt.rnn_size, false) 
+        dec_linear.name = 'dec_linear'
+	--decoder_out = nn.Tanh()(nn.LinearNoBias(opt.rnn_size*2, opt.rnn_size)(decoder_out))
+	decoder_out = nn.Tanh()(dec_linear(decoder_out))
      end
      if dropout > 0 then
 	decoder_out = nn.Dropout(dropout, nil, false)(decoder_out)
@@ -200,7 +209,7 @@ function make_decoder_crf_attn(data, opt, simple)
    attn = nn.Replicate(1,3)(attn) -- batch_l x source_l x 1
    attn_complement = nn.MulConstant(-1)(attn) -- batch_l x source_l x 1
    attn = nn.JoinTable(3)({attn, attn_complement}) -- batch_l x source_l x 2
-   --attn = nn.Tanh()(attn)
+   attn = nn.Tanh()(attn)
    --attn = nn.Dropout(.5)(attn)
    --attn = nn.Tanh()(attn)
    crf = nn.CRF(2)
@@ -233,7 +242,9 @@ function make_decoder_attn2(data, opt, simple)
    local inputs = {}
    table.insert(inputs, nn.Identity()())
    table.insert(inputs, nn.Identity()())
-   local target_t = nn.Linear(opt.rnn_size, opt.rnn_size, false)(inputs[1]) -- batch_l x rnn_size
+   targ_linear_attn = nn.Linear(opt.rnn_size, opt.rnn_size, false)
+   targ_linear_attn.name = 'targ_linear_attn'
+   local target_t = targ_linear_attn(inputs[1]) -- batch_l x rnn_size
    local context = inputs[2] -- batch_l x source_l x rnn_size
    local attn = nn.MM()({context, nn.Replicate(1, 3)(target_t)}) -- batch_l x source_l x 1
    attn = nn.Sum(3)(attn) -- batch_l x source_l
@@ -246,7 +257,7 @@ function make_decoder_attn2(data, opt, simple)
    end
    --]]
 
-   out = nn.Identity()
+   out = nn.SoftMax()
    out.name = 'softmax_attn'
    attn = out(attn)
 
@@ -264,7 +275,9 @@ function make_decoder_crf_attn2(data, opt, simple)
    table.insert(inputs, nn.Identity()())
    local context = inputs[2] -- batch_l x source_l x rnn_size
 
-   local target_t = nn.Linear(opt.rnn_size, opt.rnn_size*2, false)(inputs[1]) -- batch_l x 2*rnn_size
+   targ_linear = nn.Linear(opt.rnn_size, opt.rnn_size*2, false)
+   targ_linear.name = 'targ_linear'
+   local target_t = targ_linear(inputs[1]) -- batch_l x 2*rnn_size
    local target_t1 = nn.Narrow(2, 1, opt.rnn_size)(target_t) -- batch_l x rnn_size
    local target_t2 = nn.Narrow(2, opt.rnn_size+1, opt.rnn_size)(target_t) -- batch_l x rnn_size
 
@@ -272,9 +285,9 @@ function make_decoder_crf_attn2(data, opt, simple)
    local attn2 = nn.MM()({context, nn.Replicate(1, 3)(target_t2)})
 
    local attn = nn.JoinTable(3)({attn1, attn2})
-   attn = nn.MulConstant(.1)(attn)
+   --attn = nn.MulConstant(.1)(attn)
    --attn = nn.Tanh()(attn)
-   attn = nn.Sigmoid()(attn)
+   --attn = nn.Sigmoid()(attn)
 
    crf = nn.CRF(2)
    attn = crf(attn)
@@ -285,7 +298,7 @@ function make_decoder_crf_attn2(data, opt, simple)
    out.name = 'softmax_attn'
    attn = out(attn)
 
-   attn = nn.Normalize(2)(attn)
+   attn = nn.Normalize(1)(attn)
 
    attn = nn.Replicate(1, 2)(attn)
    local context_combined = nn.MM()({attn, context})
@@ -337,6 +350,47 @@ function make_decoder_crf_attn3(data, opt, simple)
    local context_output = nn.CAddTable()({context_combined, inputs[1]})
 
    return nn.gModule(inputs, {context_output})
+end
+
+function make_decoder_crf_attn4(data, opt, simple)
+   local inputs = {}
+   table.insert(inputs, nn.Identity()())
+   table.insert(inputs, nn.Identity()())
+   local target_t = nn.Linear(opt.rnn_size, opt.rnn_size, false)(inputs[1]) -- batch_l x rnn_size
+   local context = inputs[2] -- batch_l x source_l x rnn_size
+   local attn = nn.MM()({context, nn.Replicate(1, 3)(target_t)}) -- batch_l x source_l x 1
+   attn = nn.Replicate(1, 3)(nn.Sum(3)(attn)) -- batch_l x source_l x 1
+   attn_0 = nn.Replicate(1, 3)(nn.MulConstant(0)(attn)) -- batch_l x source_l x 1
+   attn_2 = nn.Replicate(1, 3)(nn.MulConstant(0)(attn)) -- batch_l x source_l x 1
+   attn = nn.JoinTable(3)({attn_0, attn, attn_2}) -- batch_l x source_l x 3
+   crf = nn.CRF_static(3, torch.Tensor({{0, 0, -math.huge}, {-math.huge, 0, 0}, {-math.huge, -math.huge, 0}}))
+   --print('weight', crf.weight)
+   --local weight = torch.Tensor({{0, 0, -math.huge}, {-math.huge, -math.huge, 0}, {-math.huge, -math.huge, 0}})
+   --weight = torch.randn(3, 3)
+   --crf.weight:copy(weight)
+
+   --print('weight', crf.weight)
+   attn = crf(attn) -- batch_l x source_l + 1 x 3 x 3
+
+   attn = nn.Exp()(attn)
+   --attn = nn.Print('Positional Marginals')(attn)
+   attn = nn.Sum(4)(attn) -- batch_l x source_l+1 x 3
+   attn = nn.Narrow(2, 2, -1)(attn) -- batch_l x source_l x 3
+   attn = nn.Select(3, 2)(attn) -- batch_l x source_l
+   --attn = nn.Sum(3)(attn) -- batch_l x source_l
+   --attn = nn.Normalize(2)(attn)
+
+   out = nn.Identity()
+   out.name = 'softmax_attn'
+   attn = out(attn)
+
+   attn = nn.Replicate(1, 2)(attn) -- batch_l x 1 x source_l
+   --context = nn.PrintSize('2')(context) 
+   --attn = nn.PrintSize('1')(attn)
+   context_combined = nn.MM()({attn, context}) -- batch x 1 x rnn_size
+   context_combined = nn.Sum(2)(context_combined) -- batch_l x rnn_size
+   context_output = nn.CAddTable()({context_combined, inputs[1]})
+   return nn.gModule(inputs, {context_output})   
 end
 
 
