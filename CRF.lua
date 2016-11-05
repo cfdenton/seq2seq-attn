@@ -73,6 +73,9 @@ end
 function CRF:updateGradInput(input, gradOutput)
    -- gradOutput is the gradient of the loss with respect to the marginals
    -- size batch x n+1 x c x c
+
+   -- self:updateOutput(input)
+   
    local batches = gradOutput:size(1)
    local n = gradOutput:size(2) - 1
 
@@ -116,11 +119,13 @@ function CRF:updateGradInput(input, gradOutput)
    self.gradInput:resize(batches, n, self.nstates)
    self.gradInput:copy(self._logGradInput):exp():cmul(self._logGradInputSign)
    Util.fixnan(self.gradInput)
-   --self.gradInput:renorm(2, 1, 1)
    return self.gradInput
 end
 
+
+
 function CRF:accGradParameters(input, gradOutput, scale)
+
    -- Set the gradWeight
    scale = scale or 1
 
@@ -142,10 +147,8 @@ function CRF:accGradParameters(input, gradOutput, scale)
    self._logbmmSign:resize(batches, C, C):fill(1)
 
    -- TODO: Remove contiguous
-   self._logB = self._logB:resizeAs(input):copy(input):add(self._logBackwardGrad[{{}, {2, -1}}])
-      :view(batches, -1, 1, C):transpose(1,2):contiguous()
-   self._logF = self._logF:resizeAs(input):copy(input):add(self._logForwardGrad[{{}, {1, -2}}])
-      :view(batches, -1, C, 1):transpose(1,2):contiguous()
+   self._logB = self._logB:resizeAs(input):copy(input):add(self._logBackwardGrad[{{}, {2, -1}}]):view(batches, -1, 1, C):transpose(1,2):contiguous()
+   self._logF = self._logF:resizeAs(input):copy(input):add(self._logForwardGrad[{{}, {1, -2}}]):view(batches, -1, C, 1):transpose(1,2):contiguous()
 
    local forward = self._logTables:view(2, -1, batches,  C, 1)[1]
    local backward = self._logTables:view(2, -1, batches,  1, C)[2]
@@ -153,13 +156,10 @@ function CRF:accGradParameters(input, gradOutput, scale)
    -- Temps
    local ones1 = torch.ones(self._logTables[{1,  1}]:size()):typeAs(self._logTables)
    local ones2 = torch.ones(self._logTables[{2,  1}]:size()):typeAs(self._logForwardGradSign)
-   local t1a = torch.Tensor(batches, forward[1]:size(2), forward[1]:size(3), self._logB[1]:size(3))
-      :typeAs(self._logTables)
-   local t1b = torch.Tensor(batches, forward[1]:size(2), forward[1]:size(3), self._logB[1]:size(3))
-      :typeAs(self._logTables)
+   local t1a = torch.Tensor(batches, forward[1]:size(2), forward[1]:size(3), self._logB[1]:size(3)):typeAs(self._logTables)
+   local t1b = torch.Tensor(batches, forward[1]:size(2), forward[1]:size(3), self._logB[1]:size(3)):typeAs(self._logTables)
    local t1 = self._logbmm:clone()
    local t2 = self._logbmm:clone()
-
 
    for i = 1, n do
       Util.logbmm(self._logbmm, self._logbmmSign, forward[i], self._logB[i],
@@ -174,38 +174,42 @@ function CRF:accGradParameters(input, gradOutput, scale)
       Util.logbmm(self._logbmm, self._logbmmSign, self._logF[i], backward[i+2],
                   self._logForwardGradSign:select(2, i), ones2,
                   t1a, t1b)
-
       Util.logadd(self._logGradExpandedWeight[i+1],
                   self._logGradExpandedWeightSign[i+1],
                   self._logGradExpandedWeight[i+1],
                   self._logbmm, self._logGradExpandedWeightSign[i+1], self._logbmmSign,
                   t1, t2)
    end
-
+   
    -- multiply by w and add dL/d(marginal)*d(marginal)/d(edge)
    t1 = self._logGradExpandedWeight:clone()
    self._logGradExpandedWeight:add(self._expandedWeight:transpose(1,2))
 
    Util.logadd(self._logGradExpandedWeight, self._logGradExpandedWeightSign,
-               self._logGradExpandedWeight, self._logMarginalProduct:transpose(1, 2),
+               self._logGradExpandedWeight, self._logMarginalProduct:transpose(1,2),
                self._logGradExpandedWeightSign, logGradOutputSign:transpose(1,2),
                nil, nil)
 
    -- partial with respect ot the partition
    local factor = Util.logsumNumber(self._logMarginalProduct, logGradOutputSign)
-   self.output:add(factor:view(-1, 1, 1, 1):expandAs(self.output))
-   -- goc = gradOutput:clone():fill(-1)
+   -- self.output:add(factor:view(-1, 1, 1, 1):expandAs(self.output))
+
    Util.logadd(self._logGradExpandedWeight, self._logGradExpandedWeightSign,
                self._logGradExpandedWeight,
-               self.output:add(factor:view(-1, 1, 1, 1):expandAs(self.output)),
-               -- torch.add(self.output, factor:view(-1, 1, 1, 1):expandAs(self.output)),
+               torch.add(self.output, factor:view(-1, 1, 1, 1):expandAs(self.output)),
                self._logGradExpandedWeightSign,
-               gradOutput:clone():fill(-1))
+               torch.Tensor(gradOutput:size()):typeAs(gradOutput):fill(-1))
+   
+   -- Util.logadd(self._logGradExpandedWeight, self._logGradExpandedWeightSign,
+   --             self._logGradExpandedWeight,
+   --             torch.add(self.output, factor:view(-1, 1, 1, 1):expandAs(self.output)),
+   --             -- torch.add(self.output, factor:view(-1, 1, 1, 1):expandAs(self.output)),
+   --             self._logGradExpandedWeightSign,
+   --             gradOutput:clone():fill(-1))
 
    -- -- come out of log space
    self._gradExpandedWeight:resize(batches, n+1, C, C)
-   self._gradExpandedWeight:copy(self._logGradExpandedWeight:exp()
-      :cmul(self._logGradExpandedWeightSign):transpose(1, 2))
+   self._gradExpandedWeight:copy(self._logGradExpandedWeight:exp():cmul(self._logGradExpandedWeightSign):transpose(1, 2))
    -- handle edge cases at start node
    -- initial and final weights are sums of other terms, so we expand to capture this
    self._gradExpandedWeight[{{}, 1, 1}]:div(self.nstates)
@@ -215,11 +219,10 @@ function CRF:accGradParameters(input, gradOutput, scale)
       :expand(batches, C-1, C))
    self._gradExpandedWeight[{{}, n+1, {}, {2, -1}}]:copy(
       self._gradExpandedWeight[{{}, n+1, {}, 1}]:contiguous():view(-1, C, 1)
-      :expand(batches, C, C-1))
+         :expand(batches, C, C-1))
 
    self.gradWeight:add(scale, self._gradExpandedWeight:sum(1):sum(2):squeeze())
    Util.fixnan(self.gradWeight)
-   --self.gradWeight:renorm(2, 1, 1)
 end
 
 function CRF:updateGradTables(input, logGradOutput, logGradOutputSign)
@@ -234,8 +237,7 @@ function CRF:updateGradTables(input, logGradOutput, logGradOutputSign)
    -- marginalProduct = marginal * dL/d(marginal)
    self._logMarginalProduct:resizeAs(self.output):zero()
    self._logMarginalProduct:add(logGradOutput, self.output)
-
-
+   Util.fixnan(self._logMarginalProduct)
    -- compute gradient of loss with respect to forward and backward
    -- 1. accumulate marginalProduct terms with the same forward term
    -- 2. divide by the relevant forward terms
@@ -256,7 +258,6 @@ function CRF:updateGradTables(input, logGradOutput, logGradOutputSign)
    self._logGradTables[2]:add(-1, self._logTables[{2,  {2, -1}}])
    self._logGradTables[{1, 1, {}, {2, -1}}]:fill(-math.huge)
    self._logGradTables[{2, n+1, {}, {2, -1}}]:fill(-math.huge)
-
 
    -- compute intermediate gradient tables
    -- Run the DP

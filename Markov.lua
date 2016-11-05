@@ -14,6 +14,7 @@ function Markov:__init(nstates, typ)
 
    self._forwardPotentials = torch.Tensor()
    self._backwardPotentials = torch.Tensor()
+
 end
 
 -- run viterbi algorithm
@@ -62,7 +63,7 @@ function Markov.viterbi(logMarginals)
          paths[b][i] = backPointers[b][i+1][paths[b][i+1]]
       end
    end
-   return torch.exp(bestScore), paths
+   return torch.exp(bestScore), paths:cuda()
 end
 
 function Markov.sample(logMarginals)
@@ -122,7 +123,7 @@ function Markov:makePotentials(unaryPotentials, binaryPotentials, grad)
    if not grad then
       self._backwardPotentials[{{2, -1}}]:add(unaryPotentials:transpose(3,4))
    else
-      self._backwardPotentials[{{1, -2}}]:add(unaryPotentials:transpose(3,4))
+      self._backwardPotentials[{{1, -2}}]:transpose(3, 4):add(unaryPotentials:transpose(3,4))
    end
    self._backwardPotentials[{1, {}, {2, -1}}]:fill(-math.huge)
    self._backwardPotentials[{n+1, {}, {}, {2, -1}}]:fill(-math.huge)
@@ -194,6 +195,7 @@ function Markov:forwardBackward(unaryPotentials, binaryPotentials, logTables)
    self:backward(logTables[2])
 end
 
+
 function Markov:marginals(marginals, logTables, binaryPotentials)
    -- combine tables into marginals
    local batches, n, C = get_sizes_dp(logTables[1])
@@ -214,7 +216,7 @@ function Markov:marginals(marginals, logTables, binaryPotentials)
    marginals:add(binaryPotentials)
 
    -- divide by partition to normalize
-   marginals:add(-1, logTables[{1, n+1, {}, 1}]:contiguous():view(-1,1,1,1)
+   marginals:add(-1, logTables[{1, n+2, {}, 1}]:contiguous():view(-1,1,1,1)
       :expandAs(marginals))
    marginals[{{}, 1, {2, -1}}]:fill(-math.huge)
    marginals[{{}, n+1, {}, {2, -1}}]:fill(-math.huge)
@@ -255,7 +257,9 @@ function Markov:backwardGrad(logBackwardGrad, logBackwardGradSign,
                   self._ones, logBackwardGradSign[i+1],
                   self._tempDpGrad1, self._tempDpGrad2, 2, 2)
    end
+
 end
+
 
 function Markov:forwardGrad(logForwardGrad, logForwardGradSign,
                             logGradBackward, logGradBackwardSign)

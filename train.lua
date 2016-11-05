@@ -25,6 +25,8 @@ cmd:option('-num_shards', 0, [[If the training data has been broken up into diff
                              then training files are in this many partitions]])
 cmd:option('-train_from', '', [[If training from a checkpoint then this is the path to the
                                 pretrained model.]])
+cmd:option('-pretrained_model', '', [[Pretrained vanilla model]])
+--cmd:option('-target_model', '', [[ Architecture to train with pretrained parameters ]])
 
 -- rnn model specs
 cmd:text("")
@@ -83,6 +85,7 @@ cmd:text("")
 
 -- optimization
 cmd:option('-epochs', 13, [[Number of training epochs]])
+cmd:option('-epochs_only_attn', 0, [[Number of epochs for which only the attention mechanism is trained]])
 cmd:option('-start_epoch', 1, [[If loading from a checkpoint, the epoch from which to start]])
 cmd:option('-param_init', 0.1, [[Parameters are initialized over uniform distribution with support
                                (-param_init, param_init)]])
@@ -148,7 +151,6 @@ function zero_table(t)
 end
 
 function train(train_data, valid_data)
-
    local timer = torch.Timer()
    local num_params = 0
    local start_decay = 0
@@ -205,6 +207,7 @@ function train(train_data, valid_data)
       cutorch.setDevice(opt.gpuid2)
       word_vec_layers[2].weight[1]:zero()
    else
+      --print(word_vec_layers[1])
       word_vec_layers[1].weight[1]:zero()            
       word_vec_layers[2].weight[1]:zero()
       if opt.brnn == 1 then
@@ -370,6 +373,8 @@ function train(train_data, valid_data)
          local target, target_out, nonzeros, source = d[1], d[2], d[3], d[4]
 	 local batch_l, target_l, source_l = d[5], d[6], d[7]
 	 
+         --print("length", source_l, "size", encoder_grad_proto:size(2))
+         --print("batch", batch_l, "size", encoder:size(1))
 	 local encoder_grads = encoder_grad_proto[{{1, batch_l}, {1, source_l}}]
 	 local encoder_bwd_grads 
 	 if opt.brnn == 1 then
@@ -549,12 +554,26 @@ function train(train_data, valid_data)
 	       end
 	    end	      	    
 	 end
+         if epoch <= opt.epochs_only_attn then
+             --print('zeroing gradients!')
+             -- come back to here    
+             encoder:zeroGradParameters()
+             generator:zeroGradParameters()
+             --grad_params[1]:zero()
+             --grad_params[3]:zero()
+             function zero_dec_layer(layer)
+                if layer.weight ~= nil and layer.name ~= nil then
+                   layer.gradWeight:zero()
+                end
+             end
+             decoder:apply(zero_dec_layer)
+         end
 	    	 
          word_vec_layers[1].gradWeight[1]:zero()
 	 if opt.fix_word_vecs_enc == 1 then
 	    word_vec_layers[1].gradWeight:zero()
 	 end
-	 
+
 	 grad_norm = grad_norm + grad_params[1]:norm()^2
 	 if opt.brnn == 1 then
 	    grad_norm = grad_norm + grad_params[4]:norm()^2
@@ -824,7 +843,15 @@ function main()
 		       valid_data.source:size(2), valid_data.target:size(2)))   
    
    -- Build model
-   if opt.train_from:len() == 0 then
+   if opt.pretrained_model ~= '' then
+      encoder = make_lstm(valid_data, opt, 'enc', opt.use_chars_enc)
+      decoder = make_lstm(valid_data, opt, 'dec', opt.use_chars_enc)
+      encoder, decoder = transfer_params(encoder, decoder)
+      print('outside', encoder:parameters())
+      print(decoder:parameters())
+      generator, criterion = make_generator(valid_data, opt)
+      print('transferred parameters!')
+   elseif opt.train_from:len() == 0 then
       encoder = make_lstm(valid_data, opt, 'enc', opt.use_chars_enc)
       decoder = make_lstm(valid_data, opt, 'dec', opt.use_chars_dec)
       generator, criterion = make_generator(valid_data, opt)
@@ -896,6 +923,73 @@ function main()
       encoder_bwd:apply(get_layer)
    end   
    train(train_data, valid_data)
+end
+
+function transfer_params(encoder, decoder)
+    local input = torch.load(opt.pretrained_model)
+    local input_model, _ = input[1], input[2]
+    input_encoder, input_decoder = input_model[1], input_model[2]
+
+    function get_dec_layer(layer)
+       if layer.weight ~= nil and layer.name ~= nil then
+          weight_table[layer.name] = {layer.weight, layer.bias}
+       end
+    end
+
+    function copy_layer(layer)
+       if layer.name ~= nil and weight_table[layer.name] ~= nil then
+          if layer.weight ~= nil then
+              layer.weight:copy(weight_table[layer.name][1])
+          end
+          if layer.bias ~= nil then
+              layer.bias:copy(weight_table[layer.name][2])
+          end
+       end
+       print(layer.name)
+    end
+
+    weight_table = {}
+    input_encoder:apply(get_dec_layer)
+    encoder:apply(copy_layer) 
+   
+    weight_table = {}
+    input_decoder:apply(get_dec_layer)
+    decoder:apply(copy_layer)
+    -- encoder parameters
+    --[[
+    input_param, _ = input_encoder:parameters()
+    output_param, _ = encoder:parameters()
+    for i, v in pairs(input_param) do
+       output_param[i]:copy(input_param[i])
+    end
+
+    -- decoder parameters
+    input_param, _ = input_decoder:parameters()
+    output_param, _ = decoder:parameters()
+    for i = 1, 8 do
+       output_param[i]:copy(input_param[i])
+    end
+    --]]
+    --print(output_param[8])
+    --output_param[8][{{1, 500}}]:copy(input_param[8])
+    --output_param[8][{{501, 1000}}]:copy(-1*input_param[8])
+    --output_param[9]:zero()
+   
+    -- generator parameters
+    --[[
+    input_param, _ = input_generator:parameters()
+    output_param, _ = output_generator:parameters()
+    for i, _ in pairs(input_param) do
+       output_param[i]:copy(input_param[i])
+    end
+    --]]
+    --print("hey", encoder:parameters(), decoder:parameters())
+    param, _ = encoder:getParameters()
+    in_param, _ = input_encoder:getParameters()
+    for i  = 1, 8 do
+       print('enc', torch.max(param[i]-in_param[i]))
+    end
+    return encoder, decoder 
 end
 
 main()

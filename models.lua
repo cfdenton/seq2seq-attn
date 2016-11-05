@@ -207,17 +207,20 @@ function make_decoder_crf_attn(data, opt, simple)
    --local softmax_attn = nn.SoftMax()
    --attn = softmax_attn(attn) 
    attn = nn.Replicate(1,3)(attn) -- batch_l x source_l x 1
+   attn = nn.Sigmoid()(attn)
+   
    attn_complement = nn.MulConstant(-1)(attn) -- batch_l x source_l x 1
+   attn_complement = nn.AddConstant(1)(attn_complement)
    attn = nn.JoinTable(3)({attn, attn_complement}) -- batch_l x source_l x 2
-   attn = nn.Tanh()(attn)
+   attn = nn.Log()(attn)
    --attn = nn.Dropout(.5)(attn)
    --attn = nn.Tanh()(attn)
    crf = nn.CRF(2)
-   crf.weight:copy(torch.Tensor({{1, 1}, {1, 0}}))
+   --crf.weight:copy(torch.Tensor({{1, 1}, {1, 0}}))
    attn = crf(attn) -- batch_l x source_l + 1 x 2 x 2 
    attn = nn.Exp()(attn)
-   attn = nn.Narrow(2, 1, -2)(attn) -- batch_l x source_l x 2 x 2
-   attn = nn.Sum(3)(attn) -- batch_l x source_l x 2
+   attn = nn.Narrow(2, 2, -1)(attn) -- batch_l x source_l x 2 x 2
+   attn = nn.Sum(4)(attn) -- batch_l x source_l x 2
    out = nn.Select(3, 1)
    out.name = 'softmax_attn'
    attn = out(attn)
@@ -288,17 +291,22 @@ function make_decoder_crf_attn2(data, opt, simple)
    --attn = nn.MulConstant(.1)(attn)
    --attn = nn.Tanh()(attn)
    --attn = nn.Sigmoid()(attn)
+   --attn = nn.SoftPlus()(attn)
+   --attn = nn.Log()(attn)
+   --attn = nn.Sigmoid()(attn)
+   --attn = nn.Log()(attn)
 
    crf = nn.CRF(2)
    attn = crf(attn)
    attn = nn.Exp()(attn)
-   attn = nn.Narrow(2, 1, -2)(attn)
+   attn = nn.Narrow(2, 2, -1)(attn)
    attn = nn.Sum(4)(attn)
-   out = nn.Select(3, 1)
+   attn = nn.Select(3, 1)(attn)
+
+   out = nn.Normalize(1)
    out.name = 'softmax_attn'
    attn = out(attn)
 
-   attn = nn.Normalize(1)(attn)
 
    attn = nn.Replicate(1, 2)(attn)
    local context_combined = nn.MM()({attn, context})
